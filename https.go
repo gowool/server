@@ -152,17 +152,12 @@ func (s *HTTPS) Start() error {
 		close(chErr)
 	}()
 
-	for {
-		select {
-		case err1, ok := <-chErr:
-			if !ok {
-				return err
-			}
-			if err1 != nil && !errors.Is(err1, http.ErrServerClosed) {
-				err = errors.Join(err, err1)
-			}
+	for err1 := range chErr {
+		if err1 != nil && !errors.Is(err1, http.ErrServerClosed) {
+			err = errors.Join(err, err1)
 		}
 	}
+	return err
 }
 
 func (s *HTTPS) Stop(ctx context.Context) error {
