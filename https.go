@@ -80,9 +80,13 @@ func NewHTTPS(cfg Config, handler http.Handler, logger *zap.Logger) (*HTTPS, err
 		}
 	}
 
-	var quicSrv *http3.Server
+	https := &HTTPS{
+		logger: logger,
+		cfg:    cfg.SSL,
+	}
+
 	if cfg.SSL.H3 {
-		quicSrv = &http3.Server{
+		https.quicSrv = &http3.Server{
 			TLSConfig:      tlsConfig,
 			Handler:        handler,
 			IdleTimeout:    cfg.IdleTimeout,
@@ -90,14 +94,14 @@ func NewHTTPS(cfg Config, handler http.Handler, logger *zap.Logger) (*HTTPS, err
 		}
 
 		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if err := quicSrv.SetQUICHeaders(w.Header()); err != nil {
+			if err := https.quicSrv.SetQUICHeaders(w.Header()); err != nil {
 				logger.Error("set quic headers", zap.Error(err))
 			}
 			handler.ServeHTTP(w, r)
 		})
 	}
 
-	srv := &http.Server{
+	https.srv = &http.Server{
 		Addr:              cfg.SSL.Address,
 		ErrorLog:          std,
 		TLSConfig:         tlsConfig,
@@ -109,18 +113,13 @@ func NewHTTPS(cfg Config, handler http.Handler, logger *zap.Logger) (*HTTPS, err
 		Handler:           handler,
 	}
 
-	if err := http2.ConfigureServer(srv, &http2.Server{
+	if err := http2.ConfigureServer(https.srv, &http2.Server{
 		MaxConcurrentStreams: uint32(cfg.H2C.MaxConcurrentStreams),
 	}); err != nil {
 		return nil, err
 	}
 
-	return &HTTPS{
-		logger:  logger,
-		cfg:     cfg.SSL,
-		srv:     srv,
-		quicSrv: quicSrv,
-	}, nil
+	return https, nil
 }
 
 func (s *HTTPS) Start() error {
