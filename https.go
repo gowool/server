@@ -83,6 +83,17 @@ func NewHTTPS(cfg Config, handler http.Handler, logger *zap.Logger) (*HTTPS, err
 	https := &HTTPS{
 		logger: logger,
 		cfg:    cfg.SSL,
+		srv: &http.Server{
+			Addr:              cfg.SSL.Address,
+			ErrorLog:          std,
+			TLSConfig:         tlsConfig,
+			ReadHeaderTimeout: cfg.ReadHeaderTimeout,
+			ReadTimeout:       cfg.ReadTimeout,
+			WriteTimeout:      cfg.WriteTimeout,
+			IdleTimeout:       cfg.IdleTimeout,
+			MaxHeaderBytes:    cfg.MaxHeaderBytes,
+			Handler:           handler,
+		},
 	}
 
 	if cfg.SSL.H3 {
@@ -93,24 +104,12 @@ func NewHTTPS(cfg Config, handler http.Handler, logger *zap.Logger) (*HTTPS, err
 			MaxHeaderBytes: cfg.MaxHeaderBytes,
 		}
 
-		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		https.srv.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if err := https.quicSrv.SetQUICHeaders(w.Header()); err != nil {
 				logger.Error("set quic headers", zap.Error(err))
 			}
 			handler.ServeHTTP(w, r)
 		})
-	}
-
-	https.srv = &http.Server{
-		Addr:              cfg.SSL.Address,
-		ErrorLog:          std,
-		TLSConfig:         tlsConfig,
-		ReadHeaderTimeout: cfg.ReadHeaderTimeout,
-		ReadTimeout:       cfg.ReadTimeout,
-		WriteTimeout:      cfg.WriteTimeout,
-		IdleTimeout:       cfg.IdleTimeout,
-		MaxHeaderBytes:    cfg.MaxHeaderBytes,
-		Handler:           handler,
 	}
 
 	if err := http2.ConfigureServer(https.srv, &http2.Server{
