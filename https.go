@@ -7,7 +7,6 @@ import (
 	"net"
 	"net/http"
 	"sync"
-	"time"
 
 	"github.com/mholt/acmez/v2"
 	"github.com/quic-go/quic-go/http3"
@@ -81,22 +80,33 @@ func NewHTTPS(cfg Config, handler http.Handler, logger *zap.Logger) (*HTTPS, err
 		}
 	}
 
-	quicSrv := &http3.Server{
-		TLSConfig: tlsConfig,
-		Handler:   handler,
+	var quicSrv *http3.Server
+	if cfg.SSL.H3 {
+		quicSrv = &http3.Server{
+			TLSConfig:      tlsConfig,
+			Handler:        handler,
+			IdleTimeout:    cfg.IdleTimeout,
+			MaxHeaderBytes: cfg.MaxHeaderBytes,
+		}
+
+		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if err := quicSrv.SetQUICHeaders(w.Header()); err != nil {
+				logger.Error("set quic headers", zap.Error(err))
+			}
+			handler.ServeHTTP(w, r)
+		})
 	}
 
 	srv := &http.Server{
 		Addr:              cfg.SSL.Address,
 		ErrorLog:          std,
 		TLSConfig:         tlsConfig,
-		ReadHeaderTimeout: time.Minute * 5,
-		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if err := quicSrv.SetQUICHeaders(w.Header()); err != nil {
-				logger.Error("set quic headers", zap.Error(err))
-			}
-			handler.ServeHTTP(w, r)
-		}),
+		ReadHeaderTimeout: cfg.ReadHeaderTimeout,
+		ReadTimeout:       cfg.ReadTimeout,
+		WriteTimeout:      cfg.WriteTimeout,
+		IdleTimeout:       cfg.IdleTimeout,
+		MaxHeaderBytes:    cfg.MaxHeaderBytes,
+		Handler:           handler,
 	}
 
 	if err := http2.ConfigureServer(srv, &http2.Server{
@@ -119,33 +129,40 @@ func (s *HTTPS) Start() error {
 		return err
 	}
 
-	// Open the listeners
-	udpAddr, err := net.ResolveUDPAddr("udp", s.cfg.Address)
-	if err != nil {
-		return err
+	var udpConn *net.UDPConn
+	if s.quicSrv != nil {
+		udpAddr, err := net.ResolveUDPAddr("udp", s.cfg.Address)
+		if err != nil {
+			return err
+		}
+		udpConn, err = net.ListenUDP("udp", udpAddr)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			_ = udpConn.Close()
+		}()
 	}
-	udpConn, err := net.ListenUDP("udp", udpAddr)
-	if err != nil {
-		return err
-	}
-	defer udpConn.Close()
 
 	s.logger.Info("https server start", zap.String("address", s.cfg.Address))
 
 	chErr := make(chan error, 2)
 
 	var wg sync.WaitGroup
-	wg.Add(2)
 
+	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		chErr <- s.srv.ServeTLS(lst, s.cfg.Cert, s.cfg.Key)
 	}()
 
-	go func() {
-		defer wg.Done()
-		chErr <- s.quicSrv.Serve(udpConn)
-	}()
+	if s.quicSrv != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			chErr <- s.quicSrv.Serve(udpConn)
+		}()
+	}
 
 	go func() {
 		wg.Wait()
@@ -166,17 +183,20 @@ func (s *HTTPS) Stop(ctx context.Context) error {
 	chErr := make(chan error, 2)
 
 	var wg sync.WaitGroup
-	wg.Add(2)
 
+	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		chErr <- s.srv.Shutdown(ctx)
 	}()
 
-	go func() {
-		defer wg.Done()
-		chErr <- s.quicSrv.Close()
-	}()
+	if s.quicSrv != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			chErr <- s.quicSrv.Close()
+		}()
+	}
 
 	go func() {
 		wg.Wait()

@@ -6,7 +6,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"time"
 
 	"go.uber.org/zap"
 	"golang.org/x/net/http2"
@@ -40,9 +39,11 @@ func NewHTTP(cfg Config, handler http.Handler, logger *zap.Logger) *HTTP {
 		logger:  logger,
 		address: cfg.Address,
 		srv: &http.Server{
-			ReadHeaderTimeout: time.Minute,
-			ReadTimeout:       time.Minute,
-			WriteTimeout:      time.Minute,
+			ReadHeaderTimeout: cfg.ReadHeaderTimeout,
+			ReadTimeout:       cfg.ReadTimeout,
+			WriteTimeout:      cfg.WriteTimeout,
+			IdleTimeout:       cfg.IdleTimeout,
+			MaxHeaderBytes:    cfg.MaxHeaderBytes,
 			ErrorLog:          std,
 			Handler: h2c.NewHandler(handler, &http2.Server{
 				MaxConcurrentStreams:         uint32(cfg.H2C.MaxConcurrentStreams),

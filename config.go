@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"golang.org/x/sys/cpu"
 )
@@ -33,6 +34,44 @@ type Config struct {
 
 	// Redirect when enabled forces all http connections to switch to https.
 	Redirect bool `json:"redirect,omitempty" yaml:"redirect,omitempty"`
+
+	// ReadTimeout is the maximum duration for reading the entire
+	// request, including the body. A zero or negative value means
+	// there will be no timeout.
+	//
+	// Because ReadTimeout does not let Handlers make per-request
+	// decisions on each request body's acceptable deadline or
+	// upload rate, most users will prefer to use
+	// ReadHeaderTimeout. It is valid to use them both.
+	ReadTimeout time.Duration `json:"read_timeout,omitempty" yaml:"read_timeout,omitempty"`
+
+	// ReadHeaderTimeout is the amount of time allowed to read
+	// request headers. The connection's read deadline is reset
+	// after reading the headers and the Handler can decide what
+	// is considered too slow for the body. If zero, the value of
+	// ReadTimeout is used. If negative, or if zero and ReadTimeout
+	// is zero or negative, there is no timeout.
+	ReadHeaderTimeout time.Duration `json:"read_header_timeout,omitempty" yaml:"read_header_timeout,omitempty"`
+
+	// WriteTimeout is the maximum duration before timing out
+	// writes of the response. It is reset whenever a new
+	// request's header is read. Like ReadTimeout, it does not
+	// let Handlers make decisions on a per-request basis.
+	// A zero or negative value means there will be no timeout.
+	WriteTimeout time.Duration `json:"write_timeout,omitempty" yaml:"write_timeout,omitempty"`
+
+	// IdleTimeout is the maximum amount of time to wait for the
+	// next request when keep-alives are enabled. If zero, the value
+	// of ReadTimeout is used. If negative, or if zero and ReadTimeout
+	// is zero or negative, there is no timeout.
+	IdleTimeout time.Duration `json:"idle_timeout,omitempty" yaml:"idle_timeout,omitempty"`
+
+	// MaxHeaderBytes controls the maximum number of bytes the
+	// server will read parsing the request header's keys and
+	// values, including the request line. It does not limit the
+	// size of the request body.
+	// If zero, DefaultMaxHeaderBytes is used.
+	MaxHeaderBytes int `json:"max_header_bytes,omitempty" yaml:"max_header_bytes,omitempty"`
 
 	// H2C defines http/2 server options.
 	H2C H2CConfig `json:"h2c,omitempty" yaml:"h2c,omitempty"`
@@ -104,6 +143,9 @@ type SSLConfig struct {
 
 	// AuthType mTLS auth
 	AuthType ClientAuthType `json:"auth_type,omitempty" yaml:"auth_type,omitempty"`
+
+	// H3 enable HTTP3
+	H3 bool `json:"h3,omitempty" yaml:"h3,omitempty"`
 }
 
 func (cfg *SSLConfig) InitDefaults() error {
