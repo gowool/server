@@ -1,5 +1,9 @@
 package fx
 
-import "go.uber.org/fx"
+import (
+	"go.uber.org/fx"
 
-var OptionHTTPServer = fx.Provide(NewServer)
+	"github.com/gowool/server"
+)
+
+var OptionHTTPServer = fx.Provide(server.NewServer)
