@@ -12,6 +12,7 @@ import (
 	"github.com/quic-go/quic-go/http3"
 	"go.uber.org/zap"
 	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
 )
 
 type HTTPS struct {
@@ -80,6 +81,9 @@ func NewHTTPS(cfg Config, handler http.Handler, logger *zap.Logger) (*HTTPS, err
 		}
 	}
 
+	h2s := &http2.Server{MaxConcurrentStreams: uint32(cfg.H2C.MaxConcurrentStreams)}
+	handler = h2c.NewHandler(handler, h2s)
+
 	https := &HTTPS{
 		logger: logger,
 		cfg:    cfg.SSL,
@@ -112,9 +116,7 @@ func NewHTTPS(cfg Config, handler http.Handler, logger *zap.Logger) (*HTTPS, err
 		})
 	}
 
-	if err := http2.ConfigureServer(https.srv, &http2.Server{
-		MaxConcurrentStreams: uint32(cfg.H2C.MaxConcurrentStreams),
-	}); err != nil {
+	if err := http2.ConfigureServer(https.srv, h2s); err != nil {
 		return nil, err
 	}
 

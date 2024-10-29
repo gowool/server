@@ -46,8 +46,7 @@ func NewHTTP(cfg Config, handler http.Handler, logger *zap.Logger) *HTTP {
 			MaxHeaderBytes:    cfg.MaxHeaderBytes,
 			ErrorLog:          std,
 			Handler: h2c.NewHandler(handler, &http2.Server{
-				MaxConcurrentStreams:         uint32(cfg.H2C.MaxConcurrentStreams),
-				PermitProhibitedCipherSuites: false,
+				MaxConcurrentStreams: uint32(cfg.H2C.MaxConcurrentStreams),
 			}),
 		},
 	}
