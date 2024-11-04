@@ -5,7 +5,7 @@ go 1.23.2
 replace github.com/gowool/server => ..
 
 require (
-	github.com/gowool/server v0.0.7
+	github.com/gowool/server v0.1.0
 	go.uber.org/fx v1.23.0
 )
 
@@ -13,7 +13,7 @@ require (
 	github.com/caddyserver/certmagic v0.21.4 // indirect
 	github.com/caddyserver/zerossl v0.1.3 // indirect
 	github.com/go-task/slim-sprig/v3 v3.0.0 // indirect
-	github.com/google/pprof v0.0.0-20241029153458-d1b30febd7db // indirect
+	github.com/google/pprof v0.0.0-20241101162523-b92577c0c142 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.8 // indirect
 	github.com/libdns/cloudflare v0.1.1 // indirect
 	github.com/libdns/libdns v0.2.2 // indirect
