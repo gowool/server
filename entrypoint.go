@@ -252,6 +252,11 @@ func redirectionHandler(cfg *RedirectionConfig, mCfg EntryPointsConfig) http.Han
 		}
 	}
 
+	status := http.StatusTemporaryRedirect
+	if cfg.EntryPoint.Permanent {
+		status = http.StatusPermanentRedirect
+	}
+
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Add("Strict-Transport-Security", "max-age=31536000; includeSubDomains; preload")
 		target := &url.URL{
@@ -261,6 +266,6 @@ func redirectionHandler(cfg *RedirectionConfig, mCfg EntryPointsConfig) http.Han
 			RawQuery: r.URL.RawQuery,
 		}
 
-		http.Redirect(w, r, target.String(), http.StatusPermanentRedirect)
+		http.Redirect(w, r, target.String(), status)
 	})
 }
