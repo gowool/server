@@ -4,41 +4,39 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"slices"
 	"sync"
 
 	"go.uber.org/zap"
 )
 
-type server interface {
+type entryPoint interface {
 	Start() error
 	Stop(context.Context) error
 }
 
 type Server struct {
-	servers []server
-	logger  *zap.Logger
-	wg      sync.WaitGroup
-	mu      sync.Mutex
-	chErr   chan error
+	entryPoints []entryPoint
+	logger      *zap.Logger
+	wg          sync.WaitGroup
+	mu          sync.Mutex
+	chErr       chan error
 }
 
-func NewServer(cfg Config, handler http.Handler, logger *zap.Logger) (*Server, error) {
-	servers := make([]server, 0, 2)
-	servers = append(servers, NewHTTP(cfg, handler, logger))
+func NewServer(cfg EntryPointsConfig, handler http.Handler, logger *zap.Logger) (*Server, error) {
+	entryPoints := make([]entryPoint, 0, len(cfg))
 
-	if cfg.EnableTLS() {
-		https, err := NewHTTPS(cfg, handler, logger)
+	for name := range cfg {
+		ep, err := NewEntryPoint(name, cfg, handler, logger)
 		if err != nil {
 			return nil, err
 		}
-		servers = append(servers, https)
+		entryPoints = append(entryPoints, ep)
 	}
 
 	return &Server{
-		logger:  logger,
-		servers: slices.Clip(servers),
-		chErr:   make(chan error, len(servers)),
+		logger:      logger,
+		entryPoints: entryPoints,
+		chErr:       make(chan error, len(entryPoints)),
 	}, nil
 }
 
@@ -46,14 +44,14 @@ func (s *Server) Start(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	for _, srv := range s.servers {
+	for _, ep := range s.entryPoints {
 		select {
 		case <-ctx.Done():
 			return nil
 		default:
 			s.wg.Add(1)
 
-			go func(srv server) { s.chErr <- srv.Start() }(srv)
+			go func(ep entryPoint) { s.chErr <- ep.Start() }(ep)
 		}
 	}
 
@@ -64,10 +62,10 @@ func (s *Server) Stop(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	for _, srv := range s.servers {
+	for _, ep := range s.entryPoints {
 		s.wg.Add(1)
 
-		go func(ctx context.Context, srv server) { s.chErr <- srv.Stop(ctx) }(ctx, srv)
+		go func(ctx context.Context, ep entryPoint) { s.chErr <- ep.Stop(ctx) }(ctx, ep)
 	}
 
 	done := make(chan struct{}, 1)
@@ -89,7 +87,7 @@ func (s *Server) Stop(ctx context.Context) error {
 			s.wg.Done()
 		case <-done:
 			if err != nil {
-				s.logger.Error("error on stop http server", zap.Error(err))
+				s.logger.Error("stop server", zap.Error(err))
 			}
 			return err
 		}

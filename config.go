@@ -2,14 +2,237 @@ package server
 
 import (
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
-	"fmt"
 	"os"
-	"strings"
+	"sync"
 	"time"
 
+	"github.com/caddyserver/certmagic"
+	"github.com/libdns/cloudflare"
+	"go.uber.org/zap"
 	"golang.org/x/sys/cpu"
 )
+
+type EntryPointsConfig map[string]EntryPointConfig
+
+func (cfg EntryPointsConfig) InitDefaults() (err error) {
+	for key, value := range cfg {
+		err = errors.Join(err, value.InitDefaults())
+		cfg[key] = value
+	}
+	return
+}
+
+type EntryPointConfig struct {
+	// Host and port to handle as http server.
+	Address string `json:"address,omitempty" yaml:"address,omitempty"`
+
+	// HTTP2 defines http/2 server options.
+	HTTP2 HTTP2Config `json:"http2,omitempty" yaml:"http2,omitempty"`
+
+	// HTTP3 enables HTTP/3 protocol on the entryPoint. HTTP/3 requires a TCP entryPoint,
+	// as HTTP/3 always starts as a TCP connection that then gets upgraded to UDP.
+	// In most scenarios, this entryPoint is the same as the one used for TLS traffic.
+	HTTP3 *HTTP3Config `json:"http3,omitempty" yaml:"http3,omitempty"`
+
+	Transport TransportConfig `json:"transport,omitempty" yaml:"transport,omitempty"`
+
+	HTTP HTTPConfig `json:"http,omitempty" yaml:"http,omitempty"`
+}
+
+func (cfg *EntryPointConfig) InitDefaults() error {
+	switch cfg.Address {
+	case ":http":
+		cfg.Address = ":80"
+	case ":https":
+		cfg.Address = ":443"
+	case "":
+		if cfg.HTTP.TLS == nil {
+			cfg.Address = ":80"
+		} else {
+			cfg.Address = ":443"
+		}
+	}
+
+	cfg.HTTP2.InitDefaults()
+
+	return cfg.HTTP.InitDefaults()
+}
+
+type HTTP2Config struct {
+	// MaxConcurrentStreams specifies the number of concurrent
+	// streams per connection that each client is allowed to initiate.
+	// The MaxConcurrentStreams value must be greater than zero, defaults to 250.
+	MaxConcurrentStreams uint `json:"maxConcurrentStreams,omitempty" yaml:"maxConcurrentStreams,omitempty"`
+}
+
+func (cfg *HTTP2Config) InitDefaults() {
+	if cfg.MaxConcurrentStreams == 0 {
+		cfg.MaxConcurrentStreams = 250
+	}
+}
+
+type HTTP3Config struct {
+	// AdvertisedPort defines which UDP port to advertise as the HTTP/3 authority.
+	// It defaults to the entryPoint's address port. It can be used to override
+	// the authority in the alt-svc header.
+	AdvertisedPort uint `json:"advertisedPort,omitempty" yaml:"advertisedPort,omitempty"`
+}
+
+type TransportConfig struct {
+	// ReadTimeout is the maximum duration for reading the entire
+	// request, including the body. A zero or negative value means
+	// there will be no timeout.
+	//
+	// Because ReadTimeout does not let Handlers make per-request
+	// decisions on each request body's acceptable deadline or
+	// upload rate, most users will prefer to use
+	// ReadHeaderTimeout. It is valid to use them both.
+	ReadTimeout time.Duration `json:"readTimeout,omitempty" yaml:"readTimeout,omitempty"`
+
+	// ReadHeaderTimeout is the amount of time allowed to read
+	// request headers. The connection's read deadline is reset
+	// after reading the headers and the Handler can decide what
+	// is considered too slow for the body. If zero, the value of
+	// ReadTimeout is used. If negative, or if zero and ReadTimeout
+	// is zero or negative, there is no timeout.
+	ReadHeaderTimeout time.Duration `json:"readHeaderTimeout,omitempty" yaml:"readHeaderTimeout,omitempty"`
+
+	// WriteTimeout is the maximum duration before timing out
+	// writes of the response. It is reset whenever a new
+	// request's header is read. Like ReadTimeout, it does not
+	// let Handlers make decisions on a per-request basis.
+	// A zero or negative value means there will be no timeout.
+	WriteTimeout time.Duration `json:"writeTimeout,omitempty" yaml:"writeTimeout,omitempty"`
+
+	// IdleTimeout is the maximum amount of time to wait for the
+	// next request when keep-alives are enabled. If zero, the value
+	// of ReadTimeout is used. If negative, or if zero and ReadTimeout
+	// is zero or negative, there is no timeout.
+	IdleTimeout time.Duration `json:"idleTimeout,omitempty" yaml:"idleTimeout,omitempty"`
+
+	// MaxHeaderBytes controls the maximum number of bytes the
+	// server will read parsing the request header's keys and
+	// values, including the request line. It does not limit the
+	// size of the request body.
+	// If zero, http.DefaultMaxHeaderBytes is used.
+	MaxHeaderBytes int `json:"maxHeaderBytes,omitempty" yaml:"maxHeaderBytes,omitempty"`
+}
+
+type HTTPConfig struct {
+	Redirection *RedirectionConfig `json:"redirection,omitempty" yaml:"redirection,omitempty"`
+	TLS         *TLSConfig         `json:"tls,omitempty" yaml:"tls,omitempty"`
+}
+
+func (cfg *HTTPConfig) InitDefaults() error {
+	if cfg.TLS != nil {
+		return cfg.TLS.InitDefaults()
+	}
+	return nil
+}
+
+type RedirectionConfig struct {
+	EntryPoint struct {
+		// To the target element, it can be:
+		//   - an entry point name (ex: websecure)
+		//   - a port (:443)
+		// defaults: :443
+		To string `json:"to,omitempty" yaml:"to,omitempty"`
+
+		// Scheme the redirection target scheme, defaults to `https`
+		Scheme string `json:"scheme,omitempty" yaml:"scheme,omitempty"`
+
+		// Permanent to apply a permanent redirection
+		Permanent bool `json:"permanent,omitempty" yaml:"permanent,omitempty"`
+	} `json:"entryPoint,omitempty" yaml:"entryPoint,omitempty"`
+}
+
+type TLSConfig struct {
+	InsecureSkipVerify bool                `json:"insecureSkipVerify,omitempty" yaml:"insecureSkipVerify,omitempty"`
+	Certificates       []CertificateConfig `json:"certificates,omitempty" yaml:"certificates,omitempty"`
+	ClientAuth         *ClientAuthConfig   `json:"clientAuth,omitempty" yaml:"clientAuth,omitempty"`
+	Acme               *AcmeConfig         `json:"acme,omitempty" yaml:"acme,omitempty"`
+}
+
+func (cfg *TLSConfig) InitDefaults() error {
+	if cfg.ClientAuth != nil {
+		cfg.ClientAuth.InitDefaults()
+	}
+
+	if cfg.Acme != nil {
+		return cfg.Acme.InitDefaults()
+	}
+	return nil
+}
+
+type CertificateConfig struct {
+	CertFile string `json:"certFile,omitempty" yaml:"certFile,omitempty"`
+	KeyFile  string `json:"keyFile,omitempty" yaml:"keyFile,omitempty"`
+}
+
+func (cfg CertificateConfig) Certificate() (tls.Certificate, error) {
+	if cfg.CertFile == "" {
+		return tls.Certificate{}, errors.New("CertFile is empty")
+	}
+	if cfg.KeyFile == "" {
+		return tls.Certificate{}, errors.New("KeyFile is empty")
+	}
+	if info, err := os.Stat(cfg.CertFile); err == nil {
+		if info.IsDir() {
+			return tls.Certificate{}, errors.New("CertFile is dir")
+		}
+
+		if info, err = os.Stat(cfg.KeyFile); err == nil {
+			if info.IsDir() {
+				return tls.Certificate{}, errors.New("KeyFile is dir")
+			}
+		}
+
+		return tls.LoadX509KeyPair(cfg.CertFile, cfg.KeyFile)
+	}
+	return tls.X509KeyPair([]byte(cfg.CertFile), []byte(cfg.KeyFile))
+}
+
+type ClientAuthConfig struct {
+	ClientAuthType ClientAuthType `json:"clientAuthType,omitempty" yaml:"clientAuthType,omitempty"`
+	CaFiles        []string       `json:"caFiles,omitempty" yaml:"caFiles,omitempty"`
+}
+
+func (cfg *ClientAuthConfig) InitDefaults() {
+	if cfg.ClientAuthType == "" {
+		cfg.ClientAuthType = NoClientCert
+	}
+}
+
+func (cfg *ClientAuthConfig) CertPool() (*x509.CertPool, error) {
+	pool := x509.NewCertPool()
+
+	for _, file := range cfg.CaFiles {
+		if file == "" {
+			continue
+		}
+
+		var ca []byte
+		if info, err := os.Stat(file); err == nil {
+			if info.IsDir() {
+				continue
+			}
+			ca, err = os.ReadFile(file)
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			ca = []byte(file)
+		}
+
+		if ok := pool.AppendCertsFromPEM(ca); !ok {
+			return nil, errors.New("could not append Certs from PEM")
+		}
+	}
+
+	return pool, nil
+}
 
 type ClientAuthType string
 
@@ -21,188 +244,19 @@ const (
 	RequireAndVerifyClientCert ClientAuthType = "require_and_verify_client_cert"
 )
 
-type ChallengeType string
-
-const (
-	HTTP01    ChallengeType = "http-01"
-	TLSAlpn01 ChallengeType = "tlsalpn-01"
-)
-
-type Config struct {
-	// Host and port to handle as http server.
-	Address string `json:"address,omitempty" yaml:"address,omitempty"`
-
-	// Redirect when enabled forces all http connections to switch to https.
-	Redirect bool `json:"redirect,omitempty" yaml:"redirect,omitempty"`
-
-	// ReadTimeout is the maximum duration for reading the entire
-	// request, including the body. A zero or negative value means
-	// there will be no timeout.
-	//
-	// Because ReadTimeout does not let Handlers make per-request
-	// decisions on each request body's acceptable deadline or
-	// upload rate, most users will prefer to use
-	// ReadHeaderTimeout. It is valid to use them both.
-	ReadTimeout time.Duration `json:"read_timeout,omitempty" yaml:"read_timeout,omitempty"`
-
-	// ReadHeaderTimeout is the amount of time allowed to read
-	// request headers. The connection's read deadline is reset
-	// after reading the headers and the Handler can decide what
-	// is considered too slow for the body. If zero, the value of
-	// ReadTimeout is used. If negative, or if zero and ReadTimeout
-	// is zero or negative, there is no timeout.
-	ReadHeaderTimeout time.Duration `json:"read_header_timeout,omitempty" yaml:"read_header_timeout,omitempty"`
-
-	// WriteTimeout is the maximum duration before timing out
-	// writes of the response. It is reset whenever a new
-	// request's header is read. Like ReadTimeout, it does not
-	// let Handlers make decisions on a per-request basis.
-	// A zero or negative value means there will be no timeout.
-	WriteTimeout time.Duration `json:"write_timeout,omitempty" yaml:"write_timeout,omitempty"`
-
-	// IdleTimeout is the maximum amount of time to wait for the
-	// next request when keep-alives are enabled. If zero, the value
-	// of ReadTimeout is used. If negative, or if zero and ReadTimeout
-	// is zero or negative, there is no timeout.
-	IdleTimeout time.Duration `json:"idle_timeout,omitempty" yaml:"idle_timeout,omitempty"`
-
-	// MaxHeaderBytes controls the maximum number of bytes the
-	// server will read parsing the request header's keys and
-	// values, including the request line. It does not limit the
-	// size of the request body.
-	// If zero, DefaultMaxHeaderBytes is used.
-	MaxHeaderBytes int `json:"max_header_bytes,omitempty" yaml:"max_header_bytes,omitempty"`
-
-	// H2C defines http/2 server options.
-	H2C H2CConfig `json:"h2c,omitempty" yaml:"h2c,omitempty"`
-
-	// SSL defines https server options.
-	SSL *SSLConfig `json:"ssl,omitempty" yaml:"ssl,omitempty"`
-}
-
-func (cfg *Config) EnableTLS() bool {
-	return cfg.SSL != nil && cfg.SSL.Enable()
-}
-
-func (cfg *Config) InitDefaults() error {
-	if cfg.Address == "" {
-		cfg.Address = "0.0.0.0:80"
+func (t ClientAuthType) TLSClientAuth() tls.ClientAuthType {
+	switch t {
+	case RequestClientCert:
+		return tls.RequestClientCert
+	case RequireAnyClientCert:
+		return tls.RequireAnyClientCert
+	case VerifyClientCertIfGiven:
+		return tls.VerifyClientCertIfGiven
+	case RequireAndVerifyClientCert:
+		return tls.RequireAndVerifyClientCert
+	default:
+		return tls.NoClientCert
 	}
-
-	cfg.H2C.InitDefaults()
-
-	if cfg.SSL != nil {
-		if err := cfg.SSL.InitDefaults(); err != nil {
-			return err
-		}
-	}
-
-	return cfg.Valid()
-}
-
-func (cfg *Config) Valid() error {
-	if !strings.Contains(cfg.Address, ":") {
-		return errors.New("malformed http server address")
-	}
-
-	if cfg.EnableTLS() {
-		if err := cfg.SSL.Valid(); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-type H2CConfig struct {
-	// MaxConcurrentStreams defaults to 128.
-	MaxConcurrentStreams uint `json:"max_concurrent_streams,omitempty" yaml:"max_concurrent_streams,omitempty"`
-}
-
-func (cfg *H2CConfig) InitDefaults() {
-	if cfg.MaxConcurrentStreams == 0 {
-		cfg.MaxConcurrentStreams = 128
-	}
-}
-
-type SSLConfig struct {
-	// Address to listen as HTTPS server, defaults to 0.0.0.0:443.
-	Address string `json:"address,omitempty" yaml:"address,omitempty"`
-
-	// Acme configuration
-	Acme *AcmeConfig `json:"acme,omitempty" yaml:"acme,omitempty"`
-
-	// Key defined private server key.
-	Key string `json:"key,omitempty" yaml:"key,omitempty"`
-
-	// Cert is https certificate.
-	Cert string `json:"cert,omitempty" yaml:"cert,omitempty"`
-
-	// RootCA file
-	RootCA string `json:"root_ca,omitempty" yaml:"root_ca,omitempty"`
-
-	// AuthType mTLS auth
-	AuthType ClientAuthType `json:"auth_type,omitempty" yaml:"auth_type,omitempty"`
-
-	// H3 enable HTTP3
-	H3 bool `json:"h3,omitempty" yaml:"h3,omitempty"`
-}
-
-func (cfg *SSLConfig) InitDefaults() error {
-	if cfg.Address == "" {
-		cfg.Address = "0.0.0.0:443"
-	}
-
-	if cfg.EnableACME() {
-		return cfg.Acme.InitDefaults()
-	}
-
-	return nil
-}
-
-func (cfg *SSLConfig) EnableACME() bool {
-	return cfg.Acme != nil
-}
-
-func (cfg *SSLConfig) Enable() bool {
-	return cfg.EnableACME() || cfg.Key != "" && cfg.Cert != ""
-}
-
-func (cfg *SSLConfig) Valid() error {
-	if !strings.Contains(cfg.Address, ":") {
-		return errors.New("malformed HTTPS server address")
-	}
-
-	// the user use they own certificates
-	if !cfg.EnableACME() {
-		if _, err := os.Stat(cfg.Key); err != nil {
-			if os.IsNotExist(err) {
-				return fmt.Errorf("HTTPS key file '%s' does not exists", cfg.Key)
-			}
-
-			return err
-		}
-
-		if _, err := os.Stat(cfg.Cert); err != nil {
-			if os.IsNotExist(err) {
-				return fmt.Errorf("HTTPS cert file '%s' does not exists", cfg.Cert)
-			}
-
-			return err
-		}
-	}
-
-	// RootCA is optional, but if provided - check it
-	if cfg.RootCA != "" {
-		if _, err := os.Stat(cfg.RootCA); err != nil {
-			if os.IsNotExist(err) {
-				return fmt.Errorf("root ca path provided, but path '%s' does not exists", cfg.RootCA)
-			}
-			return err
-		}
-	}
-
-	return nil
 }
 
 type AcmeConfig struct {
@@ -212,20 +266,102 @@ type AcmeConfig struct {
 	// User email, mandatory
 	Email string `json:"email" yaml:"email"`
 
-	// supported values: http-01, tlsalpn-01
-	ChallengeType ChallengeType `json:"challenge_type" yaml:"challenge_type"`
-
-	// The alternate port to use for the ACME HTTP challenge
-	AltHTTPPort int `json:"alt_http_port" yaml:"alt_http_port"`
-
-	// The alternate port to use for the ACME TLS-ALPN
-	AltTLSALPNPort int `json:"alt_tlsalpn_port" yaml:"alt_tlsalpn_port"`
-
 	// Use LE production endpoint or staging
 	UseProductionEndpoint bool `json:"use_production_endpoint" yaml:"use_production_endpoint"`
 
 	// Domains to obtain certificates
 	Domains []string `json:"domains" yaml:"domains"`
+
+	HTTPChallenge *HTTPChallengeConfig `json:"httpChallenge" yaml:"httpChallenge"`
+
+	TLSChallenge bool `json:"tlsChallenge" yaml:"tlsChallenge"`
+
+	DNSChallenge *DNSChallengeConfig `json:"dnsChallenge" yaml:"dnsChallenge"`
+
+	config *certmagic.Config
+	mu     sync.RWMutex
+}
+
+func (cfg *AcmeConfig) Config(key string, mCfg EntryPointsConfig, logger *zap.Logger) *certmagic.Config {
+	cfg.mu.RLock()
+	config := cfg.config
+	cfg.mu.RUnlock()
+	if config != nil {
+		return config
+	}
+
+	cfg.mu.Lock()
+	defer cfg.mu.Unlock()
+
+	logger = logger.Named(key)
+	cacheDir := cfg.CacheDir
+
+	cache := certmagic.NewCache(certmagic.CacheOptions{
+		GetConfigForCert: func(c certmagic.Certificate) (*certmagic.Config, error) {
+			return &certmagic.Config{
+				RenewalWindowRatio: 0,
+				MustStaple:         false,
+				OCSP:               certmagic.OCSPConfig{},
+				Storage:            &certmagic.FileStorage{Path: cacheDir},
+				Logger:             logger,
+			}, nil
+		},
+		OCSPCheckInterval:  0,
+		RenewCheckInterval: 0,
+		Capacity:           0,
+	})
+
+	cfg.config = certmagic.New(cache, certmagic.Config{
+		RenewalWindowRatio: 0,
+		MustStaple:         false,
+		OCSP:               certmagic.OCSPConfig{},
+		Storage:            &certmagic.FileStorage{Path: cacheDir},
+		Logger:             logger,
+	})
+
+	ca := certmagic.LetsEncryptStagingCA
+	if cfg.UseProductionEndpoint {
+		ca = certmagic.LetsEncryptProductionCA
+	}
+
+	altHTTPPort := 80
+	if ep, ok := mCfg[cfg.HTTPChallenge.EntryPoint]; ok {
+		altHTTPPort = Port(ep.Address)
+	}
+
+	altTLSAlpnPort := 0
+	if cfg.TLSChallenge {
+		altTLSAlpnPort = Port(mCfg[key].Address)
+	}
+
+	myAcme := certmagic.NewACMEIssuer(cfg.config, certmagic.ACMEIssuer{
+		CA:                      ca,
+		TestCA:                  certmagic.LetsEncryptStagingCA,
+		Email:                   cfg.Email,
+		Agreed:                  true,
+		DisableHTTPChallenge:    cfg.HTTPChallenge == nil,
+		DisableTLSALPNChallenge: !cfg.TLSChallenge,
+		ListenHost:              "0.0.0.0",
+		AltHTTPPort:             altHTTPPort,
+		AltTLSALPNPort:          altTLSAlpnPort,
+		CertObtainTimeout:       time.Second * 240,
+		PreferredChains:         certmagic.ChainPreference{},
+		Logger:                  logger,
+	})
+
+	if cfg.DNSChallenge != nil && cfg.DNSChallenge.Provider == CloudflareProvider {
+		myAcme.DNS01Solver = &certmagic.DNS01Solver{
+			DNSManager: certmagic.DNSManager{
+				DNSProvider: &cloudflare.Provider{
+					APIToken: cfg.DNSChallenge.APIToken,
+				},
+			},
+		}
+	}
+
+	cfg.config.Issuers = append(cfg.config.Issuers, myAcme)
+
+	return cfg.config
 }
 
 func (cfg *AcmeConfig) InitDefaults() error {
@@ -241,14 +377,45 @@ func (cfg *AcmeConfig) InitDefaults() error {
 		return errors.New("should be at least 1 domain")
 	}
 
-	if cfg.ChallengeType == "" {
-		cfg.ChallengeType = HTTP01
-		if cfg.AltHTTPPort == 0 {
-			cfg.AltHTTPPort = 80
+	if cfg.DNSChallenge != nil {
+		cfg.DNSChallenge.InitDefaults()
+
+		if cfg.DNSChallenge.APIToken == "" {
+			return errors.New("dnsChallenge.apiToken could not be empty")
 		}
 	}
 
+	if cfg.HTTPChallenge != nil {
+		if cfg.HTTPChallenge.EntryPoint == "" {
+			return errors.New("httpChallenge.entryPoint could not be empty")
+		}
+	}
+
+	if cfg.HTTPChallenge == nil && cfg.DNSChallenge == nil {
+		cfg.TLSChallenge = true
+	}
+
 	return nil
+}
+
+type HTTPChallengeConfig struct {
+	EntryPoint string `json:"entryPoint" yaml:"entryPoint"`
+}
+
+type DNSChallengeConfig struct {
+	Provider DNSProviderType   `json:"provider" yaml:"provider"`
+	APIToken string            `json:"apiToken" yaml:"apiToken"`
+	Metadata map[string]string `json:"metadata" yaml:"metadata"`
+}
+
+type DNSProviderType string
+
+const CloudflareProvider DNSProviderType = "cloudflare"
+
+func (cfg *DNSChallengeConfig) InitDefaults() {
+	if cfg.Provider == "" {
+		cfg.Provider = CloudflareProvider
+	}
 }
 
 func DefaultTLSConfig() *tls.Config {
