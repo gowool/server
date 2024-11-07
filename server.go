@@ -23,8 +23,11 @@ type Server struct {
 }
 
 func NewServer(cfg EntryPointsConfig, handler http.Handler, logger *zap.Logger) (*Server, error) {
-	entryPoints := make([]entryPoint, 0, len(cfg))
+	if err := cfg.setDefaults(); err != nil {
+		return nil, err
+	}
 
+	entryPoints := make([]entryPoint, 0, len(cfg))
 	for name := range cfg {
 		ep, err := NewEntryPoint(name, cfg, handler, logger)
 		if err != nil {

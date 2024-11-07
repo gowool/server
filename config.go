@@ -16,9 +16,9 @@ import (
 
 type EntryPointsConfig map[string]EntryPointConfig
 
-func (cfg EntryPointsConfig) InitDefaults() (err error) {
+func (cfg EntryPointsConfig) setDefaults() (err error) {
 	for key, value := range cfg {
-		err = errors.Join(err, value.InitDefaults())
+		err = errors.Join(err, value.setDefaults())
 		cfg[key] = value
 	}
 	return
@@ -41,7 +41,7 @@ type EntryPointConfig struct {
 	HTTP HTTPConfig `json:"http,omitempty" yaml:"http,omitempty"`
 }
 
-func (cfg *EntryPointConfig) InitDefaults() error {
+func (cfg *EntryPointConfig) setDefaults() error {
 	switch cfg.Address {
 	case ":http":
 		cfg.Address = ":80"
@@ -55,9 +55,9 @@ func (cfg *EntryPointConfig) InitDefaults() error {
 		}
 	}
 
-	cfg.HTTP2.InitDefaults()
+	cfg.HTTP2.setDefaults()
 
-	return cfg.HTTP.InitDefaults()
+	return cfg.HTTP.setDefaults()
 }
 
 type HTTP2Config struct {
@@ -67,7 +67,7 @@ type HTTP2Config struct {
 	MaxConcurrentStreams uint `json:"maxConcurrentStreams,omitempty" yaml:"maxConcurrentStreams,omitempty"`
 }
 
-func (cfg *HTTP2Config) InitDefaults() {
+func (cfg *HTTP2Config) setDefaults() {
 	if cfg.MaxConcurrentStreams == 0 {
 		cfg.MaxConcurrentStreams = 250
 	}
@@ -125,9 +125,9 @@ type HTTPConfig struct {
 	TLS         *TLSConfig         `json:"tls,omitempty" yaml:"tls,omitempty"`
 }
 
-func (cfg *HTTPConfig) InitDefaults() error {
+func (cfg *HTTPConfig) setDefaults() error {
 	if cfg.TLS != nil {
-		return cfg.TLS.InitDefaults()
+		return cfg.TLS.setDefaults()
 	}
 	return nil
 }
@@ -155,13 +155,13 @@ type TLSConfig struct {
 	Acme               *AcmeConfig         `json:"acme,omitempty" yaml:"acme,omitempty"`
 }
 
-func (cfg *TLSConfig) InitDefaults() error {
+func (cfg *TLSConfig) setDefaults() error {
 	if cfg.ClientAuth != nil {
-		cfg.ClientAuth.InitDefaults()
+		cfg.ClientAuth.setDefaults()
 	}
 
 	if cfg.Acme != nil {
-		return cfg.Acme.InitDefaults()
+		return cfg.Acme.setDefaults()
 	}
 	return nil
 }
@@ -199,7 +199,7 @@ type ClientAuthConfig struct {
 	CaFiles        []string       `json:"caFiles,omitempty" yaml:"caFiles,omitempty"`
 }
 
-func (cfg *ClientAuthConfig) InitDefaults() {
+func (cfg *ClientAuthConfig) setDefaults() {
 	if cfg.ClientAuthType == "" {
 		cfg.ClientAuthType = NoClientCert
 	}
@@ -364,7 +364,7 @@ func (cfg *AcmeConfig) Config(key string, mCfg EntryPointsConfig, logger *zap.Lo
 	return cfg.config
 }
 
-func (cfg *AcmeConfig) InitDefaults() error {
+func (cfg *AcmeConfig) setDefaults() error {
 	if cfg.CacheDir == "" {
 		cfg.CacheDir = "cache_dir"
 	}
@@ -378,7 +378,7 @@ func (cfg *AcmeConfig) InitDefaults() error {
 	}
 
 	if cfg.DNSChallenge != nil {
-		cfg.DNSChallenge.InitDefaults()
+		cfg.DNSChallenge.setDefaults()
 
 		if cfg.DNSChallenge.APIToken == "" {
 			return errors.New("dnsChallenge.apiToken could not be empty")
@@ -412,7 +412,7 @@ type DNSProviderType string
 
 const CloudflareProvider DNSProviderType = "cloudflare"
 
-func (cfg *DNSChallengeConfig) InitDefaults() {
+func (cfg *DNSChallengeConfig) setDefaults() {
 	if cfg.Provider == "" {
 		cfg.Provider = CloudflareProvider
 	}

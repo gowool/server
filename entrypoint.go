@@ -24,6 +24,10 @@ type EntryPoint struct {
 }
 
 func NewEntryPoint(name string, cfg EntryPointsConfig, handler http.Handler, logger *zap.Logger) (*EntryPoint, error) {
+	if err := cfg.setDefaults(); err != nil {
+		return nil, err
+	}
+
 	l := logger.Named(name)
 	std, _ := zap.NewStdLogAt(l.Named("std"), logger.Level())
 
