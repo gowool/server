@@ -19,10 +19,10 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5 # action page: <https://github.com/actions/setup-go>
         with:
-          go-version: '1.23'
+          go-version: '1.24'
 
       - name: Run linter
         uses: golangci/golangci-lint-action@v6
         with:
-          version: v1.60
+          version: v1.64
           args: -v --build-tags=race --timeout=5m
