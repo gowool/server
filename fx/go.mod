@@ -5,7 +5,7 @@ go 1.24
 replace github.com/gowool/server => ..
 
 require (
-	github.com/gowool/server v0.1.2
+	github.com/gowool/server v0.1.3
 	go.uber.org/fx v1.23.0
 )
 
