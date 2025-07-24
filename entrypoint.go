@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -21,6 +22,7 @@ type EntryPoint struct {
 	logger *zap.Logger
 	http2  *http.Server
 	http3  *http3.Server
+	cancel context.CancelFunc
 }
 
 func NewEntryPoint(name string, cfg EntryPointsConfig, handler http.Handler, logger *zap.Logger) (*EntryPoint, error) {
@@ -62,8 +64,11 @@ func NewEntryPoint(name string, cfg EntryPointsConfig, handler http.Handler, log
 
 	transport := epCfg.Transport
 
+	ctx, cancel := context.WithCancel(context.Background())
+
 	ep := &EntryPoint{
 		logger: l,
+		cancel: cancel,
 		http2: &http.Server{
 			Addr:              epCfg.Address,
 			ErrorLog:          std,
@@ -73,6 +78,9 @@ func NewEntryPoint(name string, cfg EntryPointsConfig, handler http.Handler, log
 			IdleTimeout:       transport.IdleTimeout,
 			MaxHeaderBytes:    transport.MaxHeaderBytes,
 			Handler:           h2Handler,
+			BaseContext: func(net.Listener) context.Context {
+				return ctx
+			},
 		},
 	}
 
@@ -220,6 +228,8 @@ func (ep *EntryPoint) Stop(ctx context.Context) error {
 		wg.Wait()
 		close(chErr)
 	}()
+
+	ep.cancel()
 
 	var err error
 
